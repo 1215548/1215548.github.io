@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>BLE 测试页 (Bluefy)</title>
+  <style>
+    body{font-family:-apple-system,system-ui,sans-serif;padding:16px;max-width:480px;margin:0 auto;background:#f5f5f7}
+    .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+    button{width:100%;padding:12px;border:none;border-radius:8px;background:#3B82F6;color:#fff;font-size:16px;margin-bottom:8px}
+    button:disabled{background:#9CA3AF}
+    button.gray{background:#6B7280}
+    input{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;box-sizing:border-box;font-size:14px}
+    #log{font-size:12px;line-height:1.8;color:#555;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow-y:auto}
+    .err{color:#EF4444}
+    .ok{color:#10B981}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h3 style="margin:0 0 8px">BLE 连接测试</h3>
+    <div id="env" style="font-size:13px;color:#888"></div>
+  </div>
+
+  <div class="card">
+    <label style="font-size:13px;color:#666">自定义服务 UUID（可选，留空则扫描全部）</label>
+    <input id="uuid" placeholder="例如 0000fff0-0000-1000-8000-00805f9b34fb">
+    <div style="margin-top:10px">
+      <button id="scan">扫描并选择设备</button>
+      <button id="disconnect" class="gray" disabled>断开连接</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px">日志</div>
+    <div id="log">等待操作...</div>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const scanBtn = document.getElementById('scan');
+    const discBtn = document.getElementById('disconnect');
+    const uuidInput = document.getElementById('uuid');
+    let currentDevice = null;
+
+    function log(msg, cls) {
+      const time = new Date().toLocaleTimeString();
+      logEl.textContent += `\n[${time}] ${msg}`;
+      if (cls) logEl.innerHTML += `<span class="${cls}"></span>`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // 环境自检：先确认 API 是否真的被注入
+    (function () {
+      const env = document.getElementById('env');
+      const supported = !!(navigator.bluetooth && navigator.bluetooth.requestDevice);
+      env.innerHTML = `协议：${location.protocol}<br>API 支持：<span class="${supported ? 'ok' : 'err'}">${supported ? '可用' : '不可用'}</span>`;
+      if (!supported) {
+        scanBtn.disabled = true;
+        log('navigator.bluetooth 不存在，请确认使用的是 Bluefy 而非 Safari。', 'err');
+      }
+      if (location.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        log('当前非 HTTPS 环境，多数实现会直接拒绝请求。', 'err');
+      }
+    })();
+
+    scanBtn.addEventListener('click', async () => {
+      try {
+        const custom = uuidInput.value.trim();
+        // 有自定义 UUID 就按服务过滤，否则放开全部设备
+        const options = custom
+          ? { filters: [{ services: [custom] }], optionalServices: [custom, 'device_information', 'battery_service'] }
+          : { acceptAllDevices: true, optionalServices: ['device_information', 'battery_service'] };
+
+        log('正在请求设备选择...');
+        const device = await navigator.bluetooth.requestDevice(options);
+        currentDevice = device;
+
+        log(`已选择：${device.name || '未知设备'}\nID：${device.id}`);
+        log('正在建立 GATT 连接...');
+        const server = await device.gatt.connect();
+        log('GATT 已连接，枚举主服务...', 'ok');
+        discBtn.disabled = false;
+
+        const services = await server.getPrimaryServices();
+        for (const svc of services) {
+          log(`Service: ${svc.uuid}`);
+          const chars = await svc.getCharacteristics();
+          chars.forEach(c => {
+            const props = Object.keys(c.properties).filter(k => c.properties[k]).join(',');
+            log(`  └ Char: ${c.uuid}  [${props}]`);
+          });
+        }
+        log('枚举完成。', 'ok');
+
+        device.addEventListener('gattserverdisconnected', () => {
+          log('设备已断开连接。', 'err');
+          discBtn.disabled = true;
+        });
+      } catch (e) {
+        log(`错误：${e.name} - ${e.message}`, 'err');
+      }
+    });
+
+    discBtn.addEventListener('click', () => {
+      if (currentDevice && currentDevice.gatt && currentDevice.gatt.connected) {
+        currentDevice.gatt.disconnect();
+        log('已主动断开。');
+      }
+    });
+  </script>
+</body>
+</html>
