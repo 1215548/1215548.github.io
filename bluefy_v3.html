@@ -570,6 +570,7 @@
 </style>
 </head>
 <body>
+<div style="position:fixed;top:6px;right:8px;z-index:999;font-size:11px;color:#999;background:rgba(255,255,255,.85);border:1px solid #ddd;border-radius:10px;padding:2px 9px;pointer-events:none;">v6</div>
 <div class="container">
     <h1>墨韵控制台 @By:E</h1>
 
@@ -579,6 +580,8 @@
         <div class="row">
             <button class="primary" id="scanBtn">扫描 BLE</button>
             <button id="disconnectBtn" disabled>断开</button>
+            <button id="exitCmdBtn" disabled>🚪 退出指令 (EXIT)</button>
+            <span style="color:#888;font-size:13px;">（参照固件流程：向 PN RX (0xEEE1) 发送 EXIT → ESP mode 回 STANDBY，0xEEE3 空行 indicate 确认）</span>
         </div>
         <div class="status">
             设备：<span id="deviceName">未连接</span>
@@ -842,6 +845,7 @@ const dom = {
     log: $('log'),
     scanBtn: $('scanBtn'),
     disconnectBtn: $('disconnectBtn'),
+    exitCmdBtn: $('exitCmdBtn'),
     deviceName: $('deviceName'),
     bleStatus: $('bleStatus'),
     serviceInfo: $('serviceInfo'),
@@ -1013,6 +1017,43 @@ async function connectBLE() {
 }
 
 dom.disconnectBtn.addEventListener('click', disconnectBLE);
+
+// ============================================================
+//  独立退出指令（参照 drv_nimble.c 中 EXIT 的相关流程）
+//  固件侧（ble_gatt_access_pn，PN RX 0xEEE1 写回调）：
+//    当 epaper_st.mode != STANDBY 且收到 "EXIT" (PN_cmdx[4]) 时：
+//      mode = STANDBY；step = READY；清 misc_var_st.wifi_key/ssid；
+//      置 epaper_st.indicate = "\r\n"，由 0xEEE3 indicate 回网页
+//  网页侧：writeString("EXIT") → waitForExitAck 等空行确认
+// ============================================================
+function updateExitBtn() {
+    const connected = bleDevice && bleDevice.gatt && bleDevice.gatt.connected;
+    // 独立退出与 WiFi 配置流程共享 exitAck 等待机制（exitAckResolve），
+    // WiFi 发送期间禁用，避免抢占对方的 EXIT 确认
+    const wifiBusy = connected && dom.wifiSendBtn.disabled;
+    dom.exitCmdBtn.disabled = !(connected && rxCharacteristic && !isSending && !wifiBusy);
+}
+
+async function sendExitCommand() {
+    if (!rxCharacteristic) { log("❌ RX 不可用，无法发送退出指令"); return; }
+    try {
+        dom.exitCmdBtn.disabled = true;
+        await writeString("EXIT");
+        log("退出指令已发送，等待 ESP32 确认（空行 indicate）...");
+        try {
+            await waitForExitAck(3000);
+            log("✅ ESP32 已退出当前模式（mode=STANDBY / step=READY）");
+        } catch (e) {
+            log("⚠️ " + e.message + "（ESP 可能已处于 STANDBY，或链路异常）");
+        }
+    } catch (error) {
+        log("发送 EXIT 失败：" + error.message);
+    } finally {
+        updateExitBtn();
+    }
+}
+
+dom.exitCmdBtn.addEventListener('click', sendExitCommand);
 
 async function disconnectBLE() {
     dom.disconnectBtn.disabled = true;
@@ -1912,6 +1953,7 @@ function updateSendButton() {
     const canSend = connected && rxCharacteristic && indicateCharacteristic && hasData && !blocking;
     dom.sendBtn.disabled = !canSend;
     dom.retryBtn.disabled = !(connected && hasData);
+    updateExitBtn();
 }
 
 // ============================================================
@@ -1920,6 +1962,7 @@ function updateSendButton() {
 function updateWifiButton() {
     const connected = bleDevice && bleDevice.gatt && bleDevice.gatt.connected;
     dom.wifiSendBtn.disabled = !connected;
+    updateExitBtn();
 }
 
 dom.wifiSendBtn.addEventListener('click', sendWiFiConfig);
@@ -1944,6 +1987,7 @@ async function sendWiFiConfig() {
     }
 
     dom.wifiSendBtn.disabled = true;
+    updateExitBtn(); // WiFi 发送期间禁用独立退出按钮，避免抢占 EXIT 确认
     dom.wifiStatus.textContent = '⏳ 发送配置中...';
     dom.wifiStatus.className = 'wifi-status sending';
 
@@ -1994,6 +2038,7 @@ async function sendWiFiConfig() {
         dom.wifiSendBtn.disabled = false;
         wifiConfigResolve = null;
         wifiConfigReject = null;
+        updateExitBtn();
     }
 }
 
@@ -2104,6 +2149,7 @@ async function sendImage() {
     try {
         dom.sendBtn.disabled = true;
         dom.retryBtn.disabled = false;
+        updateExitBtn(); // 发送期间禁用独立退出，避免干扰 ACK 握手
         setProgress(0, "准备发送...");
         await writeString("UPDATE_IMAGE");
         await sleep(100);
